@@ -34,49 +34,65 @@ function MultiFileAction(props) {
   const dispatch = useDispatch();
   const selectedFiles = useSelector((state) => state.files.selectedFiles);
   const files = useSelector((state) => state.files.list);
+  const [busy, setBusy] = React.useState(false);
+
+  const selectedRows = React.useMemo(
+    () => selectedFiles.map(p => files.find(f => f.path === p)).filter(Boolean), [selectedFiles, files]
+  );
 
   const { t } = props;
+
+  const allLocked = selectedRows.length > 0 && selectedRows.every(f => !!f.lock);
+  const allUnlocked = selectedRows.length > 0 && selectedRows.every(f => !f.lock && !f.isMissing);
+  const mixed = selectedRows.length > 0 && !(allLocked || allUnlocked);
+
+  const label = busy
+    ? t('Working...')
+    : mixed || selectedRows.length === 0
+      ? t('Select only Locked or only unlocked')
+      : allUnlocked
+        ? t('Lock selected')
+        : t('Unlock selected');
+
+  const handleClick = () => {
+    if (busy || mixed || selectedRows.length === 0) return;
+    setBusy(true);
+    if (allUnlocked) {
+      const batch = selectedRows
+        .filter(f => !f.lock && !f.isMissing)
+        .map(f => f.rawPath ?? f.path);
+      document.dispatchEvent(new CustomEvent('lock-batch', { detail: batch}));
+    } else {
+      const batch = selectedRows
+        .filter(f => f.lock)
+        .map(f => f.rawPath ?? f.path);
+      document.dispatchEvent(new CustomEvent('unlock-batch', { detail: batch}));
+    }
+  };
+
+  React.useEffect(() => {
+    const done = () => setBusy(false);
+    document.addEventListener('lock-batch-done', done);
+    document.addEventListener('unlock-batch-done', done);
+    return () => {
+      document.removeEventListener('lock-batch-done', done);
+      document.removeEventListener('unlock-batch-done', done);
+    };
+  }, []);
+
+
   return (
     <MultiFileActionContainer>
       <MultiFileActionBanner
         variant="info"
-        title={`${t("Selected files")}: ${selectedFiles.length}`}
-        secondaryAction={(
-          <Banner.PrimaryAction
-            variant="danger"
-            onClick={() => {
-                const rows = selectedFiles
-                  .map(p => files.find(f => f.path === p))
-                  .filter(Boolean)
-                  .filter(f => f.lock && !f.isMissing);
-
-                const batch = rows.map(f => f.rawPath ?? f.path);
-                console.log('Unlock all batch:', batch);
-                if (!batch.length) return;
-
-              document.dispatchEvent(new CustomEvent('unlock-batch', { detail: batch }));
-            }}
-          >
-            {t("Unlock all")}
-          </Banner.PrimaryAction>
-        )}
+        title={`${t("Selected files")}: ${selectedRows.length}`}
         primaryAction={(
           <Banner.PrimaryAction
-            variant="outline"
-            onClick={() => {
-                const rows = selectedFiles
-                  .map(p => files.find(f => f.path === p))          // find the row for each selected path
-                  .filter(Boolean)                                  // drop not-found (safety)
-                  .filter(f => !f.lock && !f.isMissing);
-
-              const batch = rows.map(f => f.rawPath ?? f.path);
-
-              console.log('Lock all batch:', batch);
-              if (!batch.length) return;
-              document.dispatchEvent(new CustomEvent('lock-batch', { detail: batch }));
-            }}
+            variant={allUnlocked ? 'outline' : 'danger'}
+            disabled={busy || mixed || selectedRows.length === 0}
+            onClick={handleClick}
           >
-            {t("Lock all")}
+            {label}
           </Banner.PrimaryAction>
         )}
         onDismiss={() => {

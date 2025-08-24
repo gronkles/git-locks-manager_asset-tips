@@ -363,22 +363,24 @@ function Files(props) {
   };
 
 useEffect(() => {
+  let running = false;
+
   const onLockBatch = (e) => {
+    if (running) return;
     const filePaths = e.detail || [];
     if (!filePaths.length) return;
+    running = true;
 
     window.api.git.lockFiles(repo.path, filePaths)
       .then(resultsByPath => {
-        // Only look up canonical locks for files that actually locked
         const paths = Object.keys(resultsByPath || {});
         if (!paths.length) return [];
 
-        // Fetch the canonical lock objects (same shape as single-file flow)
         return Promise.all(
           paths.map(fp =>
             window.api.git.getLockByPath(repo.path, fp)
               .then(arr => ({ filePath: fp, lock: arr && arr[0] }))
-              .catch(err => ({ filePath: fp, lock: null, error: err })) // don't explode the whole batch
+              .catch(err => ({ filePath: fp, lock: null, error: err }))
           )
         );
       })
@@ -388,21 +390,23 @@ useEffect(() => {
           if (lock) {
             dispatch(lockFileLocal({ filePath, lock }));
           } else if (error) {
-            // Optional: surface per-file errors
             dispatch(addError(`Failed to fetch lock for ${filePath}: ${error.message || error}`));
           }
         });
         dispatch(clearSelectedFiles());
       })
-      .catch(err => {
-        // Catches failures from lockFiles itself
-        dispatch(addError(err.message || String(err)));
+      .catch(err => dispatch(addError(err.message || String(err))))
+      .finally(() => {
+        running = false;
+        document.dispatchEvent(new CustomEvent('lock-batch-done'));
       });
   };
 
   const onUnlockBatch = (e) => {
+    if (running) return;
     const filePaths = e.detail || [];
     if (!filePaths.length) return;
+    running = true;
 
     window.api.git.unlockFiles(repo.path, filePaths, false)
       .then(resultsByPath => {
@@ -411,7 +415,11 @@ useEffect(() => {
         });
         dispatch(clearSelectedFiles());
       })
-      .catch(err => dispatch(addError(err.message || String(err))));
+      .catch(err => dispatch(addError(err.message || String(err))))
+      .finally(() => {
+        running = false;
+        document.dispatchEvent(new CustomEvent('unlock-batch-done'));
+      });
   };
 
   document.addEventListener('lock-batch', onLockBatch);
