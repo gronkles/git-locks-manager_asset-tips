@@ -1,5 +1,11 @@
 import { createSlice } from "@reduxjs/toolkit";
 
+const normPath = (p) =>
+  String(p || '')
+    .replace(/\\/g, '/')      // backslashes → slashes
+    .replace(/^\.\/+/, '');   // strip leading ./ if present
+
+
 const filesSlice = createSlice({
   name: "files",
   initialState: {
@@ -10,7 +16,11 @@ const filesSlice = createSlice({
   },
   reducers: {
     setFiles(state, action) {
-      state.list = action.payload;
+      state.list = (action.payload || []).map(f => ({
+        ...f,
+        path: normPath(f.path),
+        rawPath: normPath(f.rawPath ?? f.path),
+      }));
       state.lastUpdated = Date.now();
       state.fetching = false;
       state.selectedFiles = state.selectedFiles.filter(f => state.list.find(lf => lf.path === f));
@@ -22,29 +32,32 @@ const filesSlice = createSlice({
       state.fetching = false;
     },
     lockFileLocal(state, action) {
-      const fileIndex = state.list.findIndex(f => f.path === action.payload.filePath);
-      if (fileIndex === -1) {
-        return;
-      }
+      const key = normPath(action.payload.filePath);
+      const fileIndex = state.list.findIndex(f =>
+        normPath(f.path) === key || normPath(f.rawPath) === key
+      );
+      if (fileIndex === -1) return;
+
       state.list = [
         ...state.list.slice(0, fileIndex),
         {
           ...state.list[fileIndex],
           lock: action.payload.lock,
         },
-        ...state.list.slice(fileIndex + 1)
+        ...state.list.slice(fileIndex + 1),
       ];
     },
     unlockFileLocal(state, action) {
-      const fileIndex = state.list.findIndex(f => f.path === action.payload);
-      if (fileIndex === -1) {
-        return;
-      }
+      const key = normPath(action.payload);
+      const fileIndex = state.list.findIndex(f =>
+        normPath(f.path) === key || normPath(f.rawPath) === key
+      );
+      if (fileIndex === -1) return;
 
       if (state.list[fileIndex].isMissing) {
         state.list = [
           ...state.list.slice(0, fileIndex),
-          ...state.list.slice(fileIndex + 1)
+          ...state.list.slice(fileIndex + 1),
         ];
       } else {
         state.list = [
@@ -53,7 +66,7 @@ const filesSlice = createSlice({
             ...state.list[fileIndex],
             lock: undefined,
           },
-          ...state.list.slice(fileIndex + 1)
+          ...state.list.slice(fileIndex + 1),
         ];
       }
     },

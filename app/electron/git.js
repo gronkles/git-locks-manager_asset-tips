@@ -8,7 +8,8 @@ const path = require('path');
 const ini = require('ini');
 const GitAttributes = require('git-attributes');
 const fixPath = require('fix-path');
-const assetsTip = require('./git-assets-tip')
+const assetsTip = require('./git-assets-tip');
+const { normPath } = require('./paths');
 
 fixPath();
 
@@ -237,23 +238,25 @@ function listLockableFiles(repo) {
 //const norm = p => p.replace(/\\/g, '/');
 
 async function lockFile(repo, file) {
-  const { path: filePath, json } = await assetsTip.lockOne(repo, file);
-  return { [filePath]: json };
+  const { path, json } = await assetsTip.lockOne(repo, file);
+  return { [normPath(path)]: json };
 }
 
 async function unlockFile(repo, file, force) {
-  const { path: filePath, json } = await assetsTip.unlockOne(repo, file, { force });
-  return { [filePath]: json };
+  const { path, json } = await assetsTip.unlockOne(repo, file, { force });
+  return { [normPath(path)]: json };
 }
 
 async function lockFiles(repo, filePaths) {
-  const list = await assetsTip.lockMany(repo, filePaths);
-  return Object.fromEntries(list.map(r => [r.path, r.json]));
+  const { ok, errors } = await assetsTip.lockMany(repo, filePaths);
+  const okMap = Object.fromEntries(ok.map(r => [normPath(r.path), r.json]));
+  return { ok: okMap, errors };
 }
 
 async function unlockFiles(repo, filePaths, force = false) {
-  const list = await assetsTip.unlockMany(repo, filePaths, { force });
-  return Object.fromEntries(list.map(r => [r.path, r.json]));
+  const { ok, errors } = await assetsTip.unlockMany(repo, filePaths, { force });
+  const okMap = Object.fromEntries(ok.map(r => [normPath(r.path), r.json]));
+  return { ok: okMap, errors };
 }
 
 function getLockByPath(repo, path) {

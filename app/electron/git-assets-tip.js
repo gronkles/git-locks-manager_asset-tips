@@ -4,6 +4,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { normPath, joinRepo } = require('./paths');
 
 function run(repo, cmd, args, { allowFail = false, cwd } = {}) {
   return new Promise((resolve, reject) => {
@@ -30,24 +31,15 @@ async function fetchOrigin(repo, refs = []) {
   await run(repo, 'git', args);
 }
 
-async function ensureCleanPaths(repo, paths) {
-  if (!paths.length) return;
-  // List changed (staged or unstaged) files under the given paths
-  const { stdout } = await run(repo, 'git', ['diff', '--name-only', '--', ...paths]);
-  const changed = stdout.trim().split('\n').filter(Boolean);
-  if (changed.length) {
-    throw new Error(`These files have local changes (commit or stash first): ${changed.join(', ')}`);
-  }
-  // Also ensure nothing staged for commit specifically for those paths
-  const { stdout: cached } = await run(repo, 'git', ['diff', '--cached', '--name-only', '--', ...paths]);
-  const staged = cached.trim().split('\n').filter(Boolean);
-  if (staged.length) {
-    throw new Error(`These files are staged (commit or unstage first): ${staged.join(', ')}`);
-  }
+async function isPathClean(repo, p) {
+  const a = (await run(repo, 'git', ['diff', '--name-only', '--', p])).stdout.trim();
+  const b = (await run(repo, 'git', ['diff', '--cached', '--name-only', '--', p])).stdout.trim();
+  return !a && !b;
 }
 
 async function existsOnRef(repo, ref, file) {
-  const spec = `${ref}:${file}`;
+  const p = normPath(file);
+  const spec = `${ref}:${p}`;
   const { code } = await run(repo, 'git', ['cat-file', '-e', spec], { allowFail: true });
   return code === 0;
 }
@@ -73,96 +65,88 @@ function uniqueWorktreeDir(repo, name = '.wt-assets-tip') {
   return base;
 }
 
-/**
- * LOCK (multi-file):
- * 1) fetch origin
- * 2) ensure files are clean
- * 3) for files that exist on tipRef, checkout those blobs into current branch, commit once
- * 4) git lfs lock --json for each path
- * Returns: [{ path, json }]
- */
 async function lockMany(repo, paths, { tipRef = 'origin/assets-tip' } = {}) {
-  const files = Array.from(new Set(paths)).filter(Boolean);
+  const files = Array.from(new Set(paths.map(normPath))).filter(Boolean);
   if (!files.length) return [];
 
   await fetchOrigin(repo, ['assets-tip']);
-  await ensureCleanPaths(repo, files);
 
-  // Determine which of these exist on assets-tip
-  const toUpdate = [];
+  // Build "candidates" and skip noisy ones (missing/dirty) PER FILE
+  const candidates = [];
   for (const f of files) {
+    const abs = joinRepo(repo, f);
+    if (!fs.existsSync(abs)) continue;
+    if (!(await isPathClean(repo, f))) {
+      // skip: has local changes staged/unstaged
+      continue;
+    }
+    candidates.push(f);
+  }
+  if (!candidates.length) return [];
+
+  // Determine which candidates differ vs tipRef and need a sync commit
+  const toUpdate = [];
+  for (const f of candidates) {
     if (await existsOnRef(repo, tipRef, f)) {
       const [tipOid, headOid] = await Promise.all([
-        revParseBlob(repo, `${tipRef}:${f}`),              // blob on assets-tip
-        revParseBlob(repo, `HEAD:${f}`).catch(() => ''),   // blob on our HEAD ('' if missing)
+        revParseBlob(repo, `${tipRef}:${f}`),
+        revParseBlob(repo, `HEAD:${f}`).catch(() => ''), // '' if missing in HEAD
       ]);
-      if (tipOid !== headOid) toUpdate.push(f);            // only when different
+      if (tipOid !== headOid) toUpdate.push(f);
     }
   }
 
   if (toUpdate.length) {
     await run(repo, 'git', ['checkout', tipRef, '--', ...toUpdate]);
     await run(repo, 'git', ['add', '--', ...toUpdate]);
-    
+
     const subject =
       toUpdate.length === 1
         ? `Sync ${toUpdate[0]} from ${tipRef} before locking`
         : `Sync ${toUpdate.length} assets from ${tipRef} before locking`;
-
-    const body = toUpdate.slice(0, 50)  // cap the list to avoid mega messages
-      .map(f => `- ${f}`)
-      .join('\n');
-
+    const body = toUpdate.slice(0, 50).map(f => `- ${f}`).join('\n');
     const commitArgs = ['commit', '-m', subject];
     if (body) commitArgs.push('-m', body);
-
     await run(repo, 'git', commitArgs);
   }
-  // Now lock each file (JSON per file)
-  const results = [];
-  for (const f of files) {
-    const { stdout } = await run(repo, 'git', ['lfs', 'lock', f, '--json']);
-    results.push({ path: f, json: JSON.parse(stdout) });
+
+  // Try to lock each candidate independently; continue on errors
+  const ok = [], errors = [];
+  for (const f of candidates) {
+    try {
+      const { stdout } = await run(repo, 'git', ['lfs', 'lock', f, '--json']);
+      ok.push({ path: normPath(f), json: JSON.parse(stdout) });
+    } catch (err) {
+      errors.push({ path: normPath(f), message: err.message || String(err) });
+    }
   }
-  return results;
+  return { ok, errors };
 }
 
-/**
- * UNLOCK (multi-file):
- * 1) fetch origin
- * 2) create temp worktree at origin/assets-tip
- * 3) stage exact HEAD blobs for all files into that worktree index (update-index --cacheinfo)
- * 4) commit once; push
- * 5) git lfs unlock --json per file (supports {force})
- * Returns: [{ path, json }]
- */
 async function unlockMany(repo, paths, { tipBranch = 'assets-tip', force = false } = {}) {
-  const files = Array.from(new Set(paths)).filter(Boolean);
+  const files = Array.from(new Set(paths.map(normPath))).filter(Boolean);
   if (!files.length) return [];
 
   const tipRef = `origin/${tipBranch}`;
   await fetchOrigin(repo, [tipBranch]);
 
-  // Build list of files we actually need to publish (new on tip OR different blob)
+  // Decide which files we can publish (present in HEAD) and need publishing (new/different)
   const toPublish = [];
   for (const f of files) {
-    const headBlob = await revParseBlob(repo, `HEAD:${f}`).catch(() => null);
-    if (!headBlob) throw new Error(`File '${f}' not present in HEAD`);
-
+    const headBlob = await revParseBlob(repo, `HEAD:${normPath(f)}`).catch(() => null);
+    if (!headBlob) {
+      // no blob in HEAD → nothing to publish for this file; we will still attempt unlock later
+      continue;
+    }
     const onTip = await existsOnRef(repo, tipRef, f);
     if (!onTip) {
-      // New file on tip → needs publishing
-      toPublish.push([f, headBlob]);
+      toPublish.push([normPath(f), headBlob]);
     } else {
       const tipBlob = await revParseBlob(repo, `${tipRef}:${f}`);
-      if (tipBlob !== headBlob) {
-        // Different content → needs publishing
-        toPublish.push([f, headBlob]);
-      }
+      if (tipBlob !== headBlob) toPublish.push([normPath(f), headBlob]);
     }
   }
 
-  // Only create a worktree / commit / push if something actually changed
   if (toPublish.length) {
     const wt = uniqueWorktreeDir(repo);
     try {
@@ -172,9 +156,8 @@ async function unlockMany(repo, paths, { tipBranch = 'assets-tip', force = false
       const wtOpts = { cwd: wt };
       await run(repo, 'git', ['checkout', '-q', '-B', tipBranch, tipRef], wtOpts);
 
-      // Stage exact blobs without touching WT bytes
       for (const [f, headBlob] of toPublish) {
-        const absDir = path.dirname(path.join(wt, f));
+        const absDir = path.dirname(joinRepo(wt, f));
         if (absDir && absDir !== '.' && !fs.existsSync(absDir)) {
           fs.mkdirSync(absDir, { recursive: true });
         }
@@ -183,37 +166,36 @@ async function unlockMany(repo, paths, { tipBranch = 'assets-tip', force = false
 
       const srcBranch = await currentBranch(repo);
       const srcShort  = await shortHead(repo);
-
-      // Nice subject/body with file list (optional: cap the list length)
       const subject =
         toPublish.length === 1
           ? `Update ${toPublish[0][0]} from ${srcBranch} @ ${srcShort}`
           : `Update ${toPublish.length} asset(s) from ${srcBranch} @ ${srcShort}`;
-      const body = toPublish
-        .slice(0, 50)
-        .map(([f]) => `- ${f}`)
-        .join('\n');
+      const body = toPublish.slice(0,50).map(([f]) => `- ${f}`).join('\n');
 
       const commitArgs = ['commit', '-m', subject];
       if (body) commitArgs.push('-m', body);
       await run(repo, 'git', commitArgs, wtOpts);
 
-      // Plain push is already fast-forward-only unless forced server-side
       await run(repo, 'git', ['push', 'origin', tipBranch], wtOpts);
     } finally {
-      // Always try to clean up the worktree
       await run(repo, 'git', ['worktree', 'remove', '-f', wt], { allowFail: true });
     }
   }
 
-  // Always proceed to unlock the requested files, even if nothing changed
+  // Try to unlock each file independently; continue on errors
+
   const unlockArgs = force ? ['--force'] : [];
-  const results = [];
+  const ok = [], errors = [];
+
   for (const f of files) {
-    const { stdout } = await run(repo, 'git', ['lfs', 'unlock', f, '--json', ...unlockArgs]);
-    results.push({ path: f, json: JSON.parse(stdout) });
+    try {
+      const { stdout } = await run(repo, 'git', ['lfs', 'unlock', normPath(f), '--json', ...unlockArgs]);
+      ok.push({ path: normPath(f), json: JSON.parse(stdout) });
+    } catch (err) {
+      errors.push({ path: normPath(f), message: err.message || String(err) });
+    }
   }
-  return results;
+  return { ok, errors };
 }
 
 // Convenience single-file wrappers

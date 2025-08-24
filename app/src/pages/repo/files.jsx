@@ -56,6 +56,11 @@ const FileBox = styled(Box)`
   padding: ${themeGet('space.2')};
   justify-content: space-between;
 
+  background-color: ${({ $selected, theme}) => 
+    $selected
+      ? (theme?.colors?.accent?.subtle ?? '#ddf4ff')
+      : 'transparent'};
+
   &:hover {
     background-color: ${themeGet('colors.border.default')};
   }
@@ -153,10 +158,15 @@ const FileRow = withTranslation()(function FileRow(props) {
     };
   }, []);
 
+  const isSelected = selectedFiles.includes(props.path);
   const { t } = props;
   return (
-    <FileBox onClick={() => dispatch(toggleSelectedFile(props.path))}>
-      {selectedFiles.includes(props.path) ? <SelectionMarker/> : null}
+    <FileBox 
+      $selected={isSelected}
+      aria-selected={isSelected}
+      onClick={() => dispatch(toggleSelectedFile(props.path))}
+    >
+      {isSelected ? <SelectionMarker/> : null}
       <FileBoxSection>
         {props.isMissing ? (
           <Tooltip wrap noDelay direction="e" aria-label={t("This file is not in your branch. Once unlocked this row will disappear.")}>
@@ -174,50 +184,12 @@ const FileRow = withTranslation()(function FileRow(props) {
               {props.lockOwner}
               <LockIcon size={16} />
             </Tooltip>
-            <Button variant="danger" disabled={working} onClick={unlockFile}>{t('Unlock')}</Button>
-            {errorUnlocking ? (
-              <State default={false}>
-              {([isOpen, setIsOpen]) => {
-                const returnFocusRef = React.useRef(null)
-                return (
-                  <>
-                    <Dialog isOpen={isOpen} returnFocusRef={returnFocusRef} onDismiss={() => setIsOpen(false)} aria-labelledby="label">
-                      <Dialog.Header>
-                        <StyledForceUnlockIcon />
-                        {t("Force unlock")}
-                      </Dialog.Header>
-                      <Box p={3}>
-                        <Text id="label" fontFamily="sans-serif" as="div">{t('Do you want force unlock')} {props.path}</Text>
-                        <Text id="label" fontFamily="sans-serif" as="div" mt={2}>{t('Before you do, make sure nobody is working on it!')}</Text>
-                        <Flex mt={3} justifyContent="flex-end">
-                          <Button sx={{ marginRight: 1 }} onClick={() => setIsOpen(false)}>{t('Cancel')}</Button>
-                          <Button
-                            variant="danger"
-                            onClick={(e) => {
-                              e && e.stopPropagation();
-                              setIsOpen(false);
-                              setWorking(true);
-                              props.onUnlock(props.rawPath, true)
-                                .then(() => setErrorUnlocking(false))
-                                .catch(() => setErrorUnlocking(true));
-                            }}
-                          >
-                            {t('Force unlock')}
-                          </Button>
-                        </Flex>
-                      </Box>
-                    </Dialog>
-                    <Button variant="danger" sx={{ marginLeft: 1 }} disabled={working} onClick={() => setIsOpen(true)}>{t('Force unlock')}</Button>
-                  </>
-                )
-              }}
-            </State>
-            ) : null}
+            {/* removed per-row unlock button */}
           </>
         ) : (
           <>
             <UnlockIcon size={16} />
-            <Button variant="outline" disabled={working} onClick={lockFile}>{t('Lock')}</Button>
+            {/* removed per-row lock button */}
           </>
         )}
       </FileBoxSection>
@@ -362,73 +334,87 @@ function Files(props) {
       });
   };
 
-useEffect(() => {
-  let running = false;
+  useEffect(() => {
+    const runningRef = { current: false }; // or useRef(false)
 
-  const onLockBatch = (e) => {
-    if (running) return;
-    const filePaths = e.detail || [];
-    if (!filePaths.length) return;
-    running = true;
+    const onLockBatch = (e) => {
+      if (runningRef.current) return;
+      const filePaths = e.detail || [];
+      if (!filePaths.length) return;
+      runningRef.current = true;
 
-    window.api.git.lockFiles(repo.path, filePaths)
-      .then(resultsByPath => {
-        const paths = Object.keys(resultsByPath || {});
-        if (!paths.length) return [];
-
-        return Promise.all(
-          paths.map(fp =>
+      window.api.git.lockFiles(repo.path, filePaths)
+        .then(({ ok, errors }) => {
+          const paths = Object.keys(ok || {});
+          if (!paths.length) {
+            // keep a consistent shape for the next .then
+            return { items: [], errors: errors || [] };
+          }
+          const lookups = paths.map(fp =>
             window.api.git.getLockByPath(repo.path, fp)
               .then(arr => ({ filePath: fp, lock: arr && arr[0] }))
               .catch(err => ({ filePath: fp, lock: null, error: err }))
-          )
-        );
-      })
-      .then(items => {
-        if (!items) return;
-        items.forEach(({ filePath, lock, error }) => {
-          if (lock) {
-            dispatch(lockFileLocal({ filePath, lock }));
-          } else if (error) {
-            dispatch(addError(`Failed to fetch lock for ${filePath}: ${error.message || error}`));
+          );
+          return Promise.all(lookups).then(items => ({ items, errors }));
+        })
+        .then(({ items, errors }) => {
+          items.forEach(({ filePath, lock }) => {
+            if (lock) dispatch(lockFileLocal({ filePath, lock }));
+          });
+
+          if (errors && errors.length) {
+            const msg = errors.length === 1
+              ? `Lock failed for ${errors[0].path}: ${errors[0].message}`
+              : `Some locks failed:\n` +
+                errors.slice(0, 5).map(e => `• ${e.path}: ${e.message}`).join('\n');
+            dispatch(addError(msg));
           }
+        })
+        .catch(err => {
+          dispatch(addError(err.message || String(err)));
+        })
+        .finally(() => {
+          dispatch(clearSelectedFiles());
+          runningRef.current = false;
+          document.dispatchEvent(new CustomEvent('lock-batch-done'));
         });
-        dispatch(clearSelectedFiles());
-      })
-      .catch(err => dispatch(addError(err.message || String(err))))
-      .finally(() => {
-        running = false;
-        document.dispatchEvent(new CustomEvent('lock-batch-done'));
-      });
-  };
+    };
 
-  const onUnlockBatch = (e) => {
-    if (running) return;
-    const filePaths = e.detail || [];
-    if (!filePaths.length) return;
-    running = true;
+    const onUnlockBatch = (e) => {
+      if (runningRef.current) return;
+      const filePaths = e.detail || [];
+      if (!filePaths.length) return;
+      runningRef.current = true;
 
-    window.api.git.unlockFiles(repo.path, filePaths, false)
-      .then(resultsByPath => {
-        Object.keys(resultsByPath || {}).forEach(fp => {
-          dispatch(unlockFileLocal(fp));
+      window.api.git.unlockFiles(repo.path, filePaths, false)
+        .then(({ ok, errors }) => {
+          Object.keys(ok || {}).forEach(fp => dispatch(unlockFileLocal(fp)));
+
+          if (errors && errors.length) {
+            const msg = errors.length === 1
+              ? `Unlock failed for ${errors[0].path}: ${errors[0].message}`
+              : `Some unlocks failed:\n` +
+                errors.slice(0, 5).map(e => `• ${e.path}: ${e.message}`).join('\n');
+            dispatch(addError(msg));
+          }
+        })
+        .catch(err => {
+          dispatch(addError(err.message || String(err)));
+        })
+        .finally(() => {
+          dispatch(clearSelectedFiles());
+          runningRef.current = false;
+          document.dispatchEvent(new CustomEvent('unlock-batch-done'));
         });
-        dispatch(clearSelectedFiles());
-      })
-      .catch(err => dispatch(addError(err.message || String(err))))
-      .finally(() => {
-        running = false;
-        document.dispatchEvent(new CustomEvent('unlock-batch-done'));
-      });
-  };
+    };
 
-  document.addEventListener('lock-batch', onLockBatch);
-  document.addEventListener('unlock-batch', onUnlockBatch);
-  return () => {
-    document.removeEventListener('lock-batch', onLockBatch);
-    document.removeEventListener('unlock-batch', onUnlockBatch);
-  };
-}, [repo.path, dispatch]);
+    document.addEventListener('lock-batch', onLockBatch);
+    document.addEventListener('unlock-batch', onUnlockBatch);
+    return () => {
+      document.removeEventListener('lock-batch', onLockBatch);
+      document.removeEventListener('unlock-batch', onUnlockBatch);
+    };
+  }, [repo.path, dispatch]);
 
   const applyHardFilter = files => {
     if (hardFilter == 'locked') {
