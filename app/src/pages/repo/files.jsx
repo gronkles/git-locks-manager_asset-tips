@@ -6,7 +6,7 @@ import { LockIcon, UnlockIcon, AlertIcon, FileIcon, FilterIcon, CheckIcon, Passk
 import { withTranslation } from "react-i18next";
 import { useParams, useNavigate } from "react-router-dom";
 import { useSelector, useDispatch } from 'react-redux';
-import { startFetching, stopFetching, setFiles, lockFileLocal, unlockFileLocal, toggleSelectedFile } from 'Redux/components/files/filesSlice';
+import { startFetching, stopFetching, setFiles, lockFileLocal, unlockFileLocal, toggleSelectedFile, clearSelectedFiles } from 'Redux/components/files/filesSlice';
 import { addError } from 'Redux/components/errors/errorsSlice';
 import get from 'lodash/get';
 import isEmpty from 'lodash/isEmpty';
@@ -362,6 +362,42 @@ function Files(props) {
         throw err;
       });
   };
+
+useEffect(() => {
+  const onLockBatch = (e) => {
+    const filePaths = e.detail || [];
+    if (!filePaths.length) return;
+
+    // calls your Node helper via preload
+    window.api.git.lockFiles(repo.path, filePaths)
+      .then(resultsByPath => {
+        Object.entries(resultsByPath).forEach(([filePath, lockJson]) => {
+          dispatch(lockFileLocal({ filePath, lock: lockJson }));
+        });
+        dispatch(clearSelectedFiles());
+      })
+      .catch(err => dispatch(addError(err.message || String(err))));
+  };
+
+  const onUnlockBatch = (e) => {
+    const filePaths = e.detail || [];
+    if (!filePaths.length) return;
+
+    window.api.git.unlockFiles(repo.path, filePaths, /* force? */ false)
+      .then(() => {
+        filePaths.forEach(fp => dispatch(unlockFileLocal(fp)));
+        dispatch(clearSelectedFiles());
+      })
+      .catch(err => dispatch(addError(err.message || String(err))));
+  };
+
+  document.addEventListener('lock-batch', onLockBatch);
+  document.addEventListener('unlock-batch', onUnlockBatch);
+  return () => {
+    document.removeEventListener('lock-batch', onLockBatch);
+    document.removeEventListener('unlock-batch', onUnlockBatch);
+  };
+}, [repo.path, dispatch]);
 
   const applyHardFilter = files => {
     if (hardFilter == 'locked') {

@@ -8,6 +8,7 @@ const path = require('path');
 const ini = require('ini');
 const GitAttributes = require('git-attributes');
 const fixPath = require('fix-path');
+const assetsTip = require('./git-assets-tip')
 
 fixPath();
 
@@ -233,36 +234,24 @@ function listLockableFiles(repo) {
   });
 }
 
-function lockFile(repo, file) {
-  return new Promise((resolve, reject) => {
-    exec(`git lfs lock "${file}" --json`, {
-      cwd: repoRoot(repo),
-    }, (err, stdout, stderr) => {
-      if (stderr) {
-        reject(stderr);
-      } else if (err) {
-        reject(err);
-      } else {
-        resolve(JSON.parse(stdout));
-      }
-    });
-  });
+async function lockFile(repo, file) {
+  const res = await assetsTip.lockOne(repo, file);
+  return res.json;
 }
 
-function unlockFile(repo, file, force) {
-  return new Promise((resolve, reject) => {
-    exec(`git lfs unlock "${file}" --json${force ? " --force" : ""}`, {
-      cwd: repoRoot(repo),
-    }, (err, stdout, stderr) => {
-      if (stderr) {
-        reject(stderr);
-      } else if (err) {
-        reject(err);
-      } else {
-        resolve(JSON.parse(stdout));
-      }
-    });
-  });
+async function unlockFile(repo, file, force) {
+  const res = await assetsTip.unlockOne(repo, file, { force });
+  return res.json;
+}
+
+async function lockFiles(repo, filePaths) {
+  const list = await assetsTip.lockMany(repo, filePaths);
+  return Object.fromEntries(list.map(r => [r.path, r.json]));
+}
+
+async function unlockFiles(repo, filePaths, force = false) {
+  const list = await assetsTip.unlockMany(repo, filePaths, { force });
+  return Object.fromEntries(list.map(r => [r.path, r.json]));
 }
 
 function getLockByPath(repo, path) {
@@ -286,6 +275,8 @@ module.exports = {
   listLockableFiles,
   lockFile,
   unlockFile,
+  lockFiles,
+  unlockFiles,
   getLockByPath,
   remotes,
   readLfsconfig,
