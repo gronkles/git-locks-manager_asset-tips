@@ -345,16 +345,15 @@ function Files(props) {
   }
 
   const onLock = (filePath) => {
+    //const norm = p => p.replace(/\\/g, '/');
     window.api.git.lockFile(repo.path, filePath)
       .then(() => window.api.git.getLockByPath(repo.path, filePath))
-      .then(lock => dispatch(lockFileLocal({
-        filePath,
-        lock: lock[0],
-      })))
-      .catch(err => dispatch(addError(err.message || err)));
+      .then(lock => dispatch(lockFileLocal({ filePath: filePath, lock: lock[0] })))
+      .catch(err => dispatch(addError(err.message || String(err))));
   };
 
   const onUnlock = (filePath, force) => {
+    //const norm = p => p.replace(/\\/g, '/');
     return window.api.git.unlockFile(repo.path, filePath, force)
       .then(() => dispatch(unlockFileLocal(filePath)))
       .catch(err => {
@@ -368,24 +367,48 @@ useEffect(() => {
     const filePaths = e.detail || [];
     if (!filePaths.length) return;
 
-    // calls your Node helper via preload
     window.api.git.lockFiles(repo.path, filePaths)
       .then(resultsByPath => {
-        Object.entries(resultsByPath).forEach(([filePath, lockJson]) => {
-          dispatch(lockFileLocal({ filePath, lock: lockJson }));
+        // Only look up canonical locks for files that actually locked
+        const paths = Object.keys(resultsByPath || {});
+        if (!paths.length) return [];
+
+        // Fetch the canonical lock objects (same shape as single-file flow)
+        return Promise.all(
+          paths.map(fp =>
+            window.api.git.getLockByPath(repo.path, fp)
+              .then(arr => ({ filePath: fp, lock: arr && arr[0] }))
+              .catch(err => ({ filePath: fp, lock: null, error: err })) // don't explode the whole batch
+          )
+        );
+      })
+      .then(items => {
+        if (!items) return;
+        items.forEach(({ filePath, lock, error }) => {
+          if (lock) {
+            dispatch(lockFileLocal({ filePath, lock }));
+          } else if (error) {
+            // Optional: surface per-file errors
+            dispatch(addError(`Failed to fetch lock for ${filePath}: ${error.message || error}`));
+          }
         });
         dispatch(clearSelectedFiles());
       })
-      .catch(err => dispatch(addError(err.message || String(err))));
+      .catch(err => {
+        // Catches failures from lockFiles itself
+        dispatch(addError(err.message || String(err)));
+      });
   };
 
   const onUnlockBatch = (e) => {
     const filePaths = e.detail || [];
     if (!filePaths.length) return;
 
-    window.api.git.unlockFiles(repo.path, filePaths, /* force? */ false)
-      .then(() => {
-        filePaths.forEach(fp => dispatch(unlockFileLocal(fp)));
+    window.api.git.unlockFiles(repo.path, filePaths, false)
+      .then(resultsByPath => {
+        Object.keys(resultsByPath || {}).forEach(fp => {
+          dispatch(unlockFileLocal(fp));
+        });
         dispatch(clearSelectedFiles());
       })
       .catch(err => dispatch(addError(err.message || String(err))));

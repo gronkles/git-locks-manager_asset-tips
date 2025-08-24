@@ -234,14 +234,16 @@ function listLockableFiles(repo) {
   });
 }
 
+//const norm = p => p.replace(/\\/g, '/');
+
 async function lockFile(repo, file) {
-  const res = await assetsTip.lockOne(repo, file);
-  return res.json;
+  const { path: filePath, json } = await assetsTip.lockOne(repo, file);
+  return { [filePath]: json };
 }
 
 async function unlockFile(repo, file, force) {
-  const res = await assetsTip.unlockOne(repo, file, { force });
-  return res.json;
+  const { path: filePath, json } = await assetsTip.unlockOne(repo, file, { force });
+  return { [filePath]: json };
 }
 
 async function lockFiles(repo, filePaths) {

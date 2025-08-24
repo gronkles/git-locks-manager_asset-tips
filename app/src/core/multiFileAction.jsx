@@ -45,9 +45,15 @@ function MultiFileAction(props) {
           <Banner.PrimaryAction
             variant="danger"
             onClick={() => {
-              const batch = files
-                .filter(f => selectedFiles.includes(f.path) && f.lock)
-                .map(f => f.rawPath);
+                const rows = selectedFiles
+                  .map(p => files.find(f => f.path === p))
+                  .filter(Boolean)
+                  .filter(f => f.lock && !f.isMissing);
+
+                const batch = rows.map(f => f.rawPath ?? f.path);
+                console.log('Unlock all batch:', batch);
+                if (!batch.length) return;
+
               document.dispatchEvent(new CustomEvent('unlock-batch', { detail: batch }));
             }}
           >
@@ -58,9 +64,15 @@ function MultiFileAction(props) {
           <Banner.PrimaryAction
             variant="outline"
             onClick={() => {
-              const batch = files
-                .filter(f => selectedFiles.includes(f.path) && !f.lock)
-                .map(f => f.rawPath);
+                const rows = selectedFiles
+                  .map(p => files.find(f => f.path === p))          // find the row for each selected path
+                  .filter(Boolean)                                  // drop not-found (safety)
+                  .filter(f => !f.lock && !f.isMissing);
+
+              const batch = rows.map(f => f.rawPath ?? f.path);
+
+              console.log('Lock all batch:', batch);
+              if (!batch.length) return;
               document.dispatchEvent(new CustomEvent('lock-batch', { detail: batch }));
             }}
           >
